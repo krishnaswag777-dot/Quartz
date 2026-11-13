@@ -1,3 +1,4 @@
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -5,54 +6,86 @@ const dotenv = require('dotenv');
 
 dotenv.config({ path: path.join(__dirname, '.env') });
 
-// ===========================
-// Gemini Configuration
-// Paste your Gemini API key below or set GEMINI_API_KEY in .env
-// ===========================
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname)));
+// Gemini configuration
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 
+const GEMINI_API_URL =
+  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+// Frontend origins
+const allowedOrigins = (
+  process.env.FRONTEND_ORIGINS ||
+  'https://hridayrocky777-a11y.github.io,http://localhost:5500,http://127.0.0.1:5500'
+)
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: allowedOrigins
+}));
+
+app.use(express.json({ limit: '20kb' }));
+
+// Health check
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'Quartz AI API', geminiConfigured: GEMINI_API_KEY !== 'PASTE_YOUR_API_KEY_HERE' });
+  res.json({
+    ok: true,
+    service: 'Quartz AI API',
+    geminiConfigured: Boolean(GEMINI_API_KEY)
+  });
 });
 
+// Gemini chat
 app.post('/api/chat', async (req, res) => {
   try {
     const { message } = req.body || {};
 
-    if (!message || typeof message !== 'string' || !message.trim()) {
-      return res.status(400).json({ error: 'A message is required.' });
+    if (typeof message !== 'string' || !message.trim()) {
+      return res.status(400).json({
+        error: 'A message is required.'
+      });
+    }
+
+    if (message.length > 10000) {
+      return res.status(400).json({
+        error: 'Message is too long.'
+      });
     }
 
     if (!GEMINI_API_KEY) {
-      return res.status(500).json({ error: 'Gemini API key is not configured. Set GEMINI_API_KEY in your .env file.' });
+      return res.status(503).json({
+        error: 'Gemini API key is not configured.'
+      });
     }
 
-    const response = await fetch(`${GEMINI_API_URL}?key=${GEMINI_API_KEY}`, {
+    const response = await fetch(GEMINI_API_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': GEMINI_API_KEY
+      },
       body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: `You are Quartz, a helpful AI study assistant for students. Respond clearly and concisely.\n\nUser: ${message.trim()}`
-              }
-            ]
-          }
-        ],
+        systemInstruction: {
+          parts: [{
+            text: 'You are Quartz, a helpful AI study assistant for students. Explain concepts clearly, accurately and in student-friendly language. Use examples when helpful.'
+          }]
+        },
+        contents: [{
+          role: 'user',
+          parts: [{
+            text: message.trim()
+          }]
+        }],
         generationConfig: {
           temperature: 0.7,
           topK: 40,
           topP: 0.95,
-          maxOutputTokens: 800
+          maxOutputTokens: 1000
         }
       })
     });
@@ -60,22 +93,54 @@ app.post('/api/chat', async (req, res) => {
     const data = await response.json();
 
     if (!response.ok) {
-      const detail = data?.error?.message || 'Gemini request failed.';
-      return res.status(response.status).json({ error: detail });
+      console.error('Gemini API status:', response.status);
+
+      return res.status(502).json({
+        error: 'The AI service could not complete your request.'
+      });
     }
 
-    const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text || 'No response received.';
+    const reply = data?.candidates?.[0]?.content?.parts
+      ?.map(part => part.text || '')
+      .join('')
+      .trim();
+
+    if (!reply) {
+      return res.status(502).json({
+        error: 'No response received from Gemini.'
+      });
+    }
+
     return res.json({ reply });
+
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ error: 'Unable to reach the Gemini API.' });
+    console.error('Chat error:', error.message);
+
+    return res.status(500).json({
+      error: 'Unable to reach the AI service.'
+    });
   }
 });
 
-app.get(/^(?!\/api).*/, (_req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+// Unknown API routes
+app.use('/api', (_req, res) => {
+  res.status(404).json({
+    error: 'API endpoint not found.'
+  });
 });
 
+// Error handler
+app.use((err, _req, res, _next) => {
+  console.error('Server error:', err.message);
+
+  res.status(err.status || 500).json({
+    error: err.status === 413
+      ? 'Request is too large.'
+      : 'Something went wrong.'
+  });
+});
+
+// Start server
 app.listen(PORT, () => {
-  console.log(`Quartz server listening on http://localhost:${PORT}`);
+  console.log(`Quartz AI server running on port ${PORT}`);
 });
